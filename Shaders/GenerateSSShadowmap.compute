@@ -1,0 +1,380 @@
+// =============================================================================
+// GenerateSSShadowmap.compute
+// URP向け 非破壊・高品質PCSS スクリーンスペースシャドウマップ生成
+//
+//  Kernel 0 (CSMainPCSS)  : スクリーン空間でPCSSを実行し、生のライトマスク
+//                           (0=影, 1=光) を _RawShadowResult に書き込む。
+//  Kernel 1 (CSBilateral) : World距離を重みにした 3x3 バイラテラルフィルタで
+//                           ノイズを除去し、_SSShadowResult へ書き込む。
+//
+//  ※ URPコアは一切改変しない。URPがグローバルに設定するシャドウ変数
+//    (_MainLightWorldToShadow / _CascadeShadowSplitSpheresN / _MainLightShadowParams)
+//    を Compute Shader 側で宣言し、そのまま読み取る非破壊方式。
+// =============================================================================
+
+#pragma kernel CSMainPCSS
+#pragma kernel CSBilateral
+
+#define N_SAMPLE 16
+#define PI 3.14159265359
+
+// ---------------------------------------------------------------------------
+// リソース
+// ---------------------------------------------------------------------------
+Texture2D<float>    _CameraDepthTexture;          // カメラ深度 (raw device depth)
+Texture2D<float>    _MainLightShadowmapTexture;   // URPメインライト シャドウアトラス
+SamplerState        sampler_PointClamp;
+
+RWTexture2D<float>  _RawShadowResult;             // Kernel0 出力 / Kernel1 入力
+Texture2D<float>    _RawShadowResultTex;          // Kernel1 で読む用 (同一内容)
+RWTexture2D<float>  _SSShadowResult;              // Kernel1 出力 (最終)
+
+Texture2D<float4>   _PCSS_BlueNoiseTex;           // ブルーノイズ (回転角ディザ用)
+
+// ---------------------------------------------------------------------------
+// URPがグローバル設定するシャドウ変数 (非破壊取得)
+// MainLightShadowCasterPass.SetShadowmapData() がフレーム毎に設定する。
+// ---------------------------------------------------------------------------
+float4x4 _MainLightWorldToShadow[5];
+float4   _CascadeShadowSplitSpheres0;   // xyz=中心, w=半径
+float4   _CascadeShadowSplitSpheres1;
+float4   _CascadeShadowSplitSpheres2;
+float4   _CascadeShadowSplitSpheres3;
+float4   _MainLightShadowParams;        // x=strength, y=soft, z=fadeScale, w=fadeBias
+
+// ---------------------------------------------------------------------------
+// C#から設定するパラメータ
+// ---------------------------------------------------------------------------
+float4x4 _PCSS_InvViewProj;       // ワールド復元用 逆ViewProj (GPU clip space)
+float4   _PCSS_CameraPosWS;        // カメラ ワールド座標 (xyz)
+float4   _PCSS_TextureSize;        // x=width, y=height, z=1/width, w=1/height (出力RT)
+float    _PCSS_ShadowTexelSize;    // 1.0 / シャドウアトラス解像度(幅)
+int      _PCSS_CascadeCount;       // カスケード数
+float    _PCSS_CascadeBorder;      // カスケード境界ブレンド幅(0〜1)。0で無効
+float    _PCSS_BlockerSearchRadius;// 遮蔽検索半径 (小さめ)
+float    _PCSS_PCFFilterRadius;    // ぼかし半径乗数 (大きめ)
+float    _PCSS_LightSize;          // ライトサイズ (半影の広がり強度)
+float    _PCSS_DepthBias;          // シャドウ深度バイアス (アクネ対策)
+float    _PCSS_MaxFilterRadius;    // フィルタ半径の最大値 (アトラスUV単位)
+float    _PCSS_BilateralSharpness; // バイラテラル距離係数 (大=シャープ)
+float    _PCSS_FarSoftness;        // 遠方(影の先端)のボケ強調。0=従来通り(線形)
+float3   _PCSS_LightDirection;     // ライトへ向かう方向(正規化, world)。傾斜バイアス用
+float    _PCSS_SlopeBiasScale;     // 傾斜バイアス係数。フィルタ半径×1/tan(仰角)に比例
+float2   _PCSS_BlueNoiseSize;      // ブルーノイズテクスチャの解像度(w,h)
+int      _PCSS_UseBlueNoise;       // 1=ブルーノイズ使用 / 0=IGNフォールバック
+int      _PCSS_ReversedZ;          // 1=reversed-Z (D3D/Vulkan/Metal), 0=通常(GL)
+
+// ---------------------------------------------------------------------------
+// ポアソンディスク (16点)
+// ---------------------------------------------------------------------------
+static const float2 poissonDisk[N_SAMPLE] =
+{
+    float2(-0.94201624, -0.39906216), float2( 0.94558609, -0.76890725),
+    float2(-0.09418410, -0.92938870), float2( 0.34495938,  0.29387760),
+    float2(-0.91588581,  0.45771432), float2(-0.81544232, -0.87912464),
+    float2(-0.38277543,  0.27676845), float2( 0.97484398,  0.75648379),
+    float2( 0.44323325, -0.97511554), float2( 0.53742981, -0.47373420),
+    float2(-0.26496911, -0.41893023), float2( 0.79197514,  0.19090188),
+    float2(-0.24188840,  0.99706507), float2(-0.81409955,  0.91437590),
+    float2( 0.19984126,  0.78641367), float2( 0.14383161, -0.14100790)
+};
+
+// 2x2ブロックでシードを共有し、チラつきを防ぐノイズ (フォールバック用)
+float InterleavedGradientNoise(float2 pixCoord)
+{
+    float2 sharedCoord = floor(pixCoord / 2.0);
+    return frac(sin(dot(sharedCoord, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+// サンプリング回転角を取得。ブルーノイズが有効ならそれを、無ければIGNを使う。
+// ※ TAA未導入のため、フレーム間ではノイズを固定してチラつきを防ぐ(画面座標で固定)。
+float GetRotationAngle(uint2 pixel)
+{
+    if (_PCSS_UseBlueNoise != 0)
+    {
+        uint2 c = pixel % (uint2)max(_PCSS_BlueNoiseSize, float2(1.0, 1.0));
+        float bn = _PCSS_BlueNoiseTex.Load(int3((int2)c, 0)).r;
+        return bn * 2.0 * PI;
+    }
+    return InterleavedGradientNoise(pixel) * 2.0 * PI;
+}
+
+float2 RotateVec2(float2 v, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    return float2(v.x * c + v.y * s, -v.x * s + v.y * c);
+}
+
+// ---------------------------------------------------------------------------
+// 4.1 World Position の復元
+// ---------------------------------------------------------------------------
+float3 ComputeWorldPosition(float2 screenUV, float rawDepth)
+{
+    float4 positionCS = float4(screenUV * 2.0 - 1.0, rawDepth, 1.0);
+    // UNITY_UV_STARTS_AT_TOP は現行全プラットフォームで usesReversedZBuffer と一致する
+    // ため、_PCSS_ReversedZ を流用してYを反転する (include不要の自己完結化)。
+    if (_PCSS_ReversedZ != 0)
+        positionCS.y = -positionCS.y;
+    float4 positionWS = mul(_PCSS_InvViewProj, positionCS);
+    return positionWS.xyz / positionWS.w;
+}
+
+// ---------------------------------------------------------------------------
+// 4.2 カスケードインデックスの判定
+// ---------------------------------------------------------------------------
+uint ComputeCascadeIndex(float3 positionWS)
+{
+    if (_PCSS_CascadeCount <= 1)
+        return 0;
+
+    float3 fromCenter0 = positionWS - _CascadeShadowSplitSpheres0.xyz;
+    float3 fromCenter1 = positionWS - _CascadeShadowSplitSpheres1.xyz;
+    float3 fromCenter2 = positionWS - _CascadeShadowSplitSpheres2.xyz;
+    float3 fromCenter3 = positionWS - _CascadeShadowSplitSpheres3.xyz;
+
+    float4 distSq = float4(dot(fromCenter0, fromCenter0), dot(fromCenter1, fromCenter1),
+                           dot(fromCenter2, fromCenter2), dot(fromCenter3, fromCenter3));
+    float4 radii  = float4(_CascadeShadowSplitSpheres0.w, _CascadeShadowSplitSpheres1.w,
+                           _CascadeShadowSplitSpheres2.w, _CascadeShadowSplitSpheres3.w);
+    float4 radiiSq = radii * radii;
+
+    float4 weights = float4(distSq < radiiSq);
+    weights.yzw = saturate(weights.yzw - weights.xyz);
+    return (uint)(4 - dot(weights, float4(4, 3, 2, 1)));
+}
+
+// ワールド座標 -> シャドウアトラス座標 (xy=UV, z=ライト空間深度[0,1])
+float3 WorldToShadowCoord(float3 positionWS, uint cascadeIndex)
+{
+    float4 coord = mul(_MainLightWorldToShadow[cascadeIndex], float4(positionWS, 1.0));
+    return coord.xyz / coord.w;
+}
+
+// 指定カスケードの包囲球 (xyz=中心, w=半径)
+float4 GetCascadeSphere(uint i)
+{
+    if (i == 0) return _CascadeShadowSplitSpheres0;
+    if (i == 1) return _CascadeShadowSplitSpheres1;
+    if (i == 2) return _CascadeShadowSplitSpheres2;
+    return _CascadeShadowSplitSpheres3;
+}
+
+// 遮蔽判定: storedZ がライトにより近い(=遮蔽物)なら true。bias で受光面を光側へ押す。
+//   reversed-Z : ライトに近いほど深度値は大きい  -> storedZ > receiverZ + bias
+//   通常        : ライトに近いほど深度値は小さい  -> storedZ < receiverZ - bias
+bool IsBlocker(float storedZ, float receiverZ, float bias)
+{
+    if (_PCSS_ReversedZ != 0)
+        return storedZ > receiverZ + bias;
+    else
+        return storedZ < receiverZ - bias;
+}
+
+// 傾斜(receiver-plane)バイアス。フィルタ半径(アトラスUV)と光の仰角から深度バイアスを算出。
+//   光が低い(grazing)ほど tan(仰角) が小さくなりバイアスが増える → 縞模様/突変エッジを防ぐ。
+//   大PCFカーネルでは半径が大きいほど誤遮蔽しやすいので半径に比例させる。
+float ReceiverBias(float radiusUV)
+{
+    float ly = abs(_PCSS_LightDirection.y);
+    float tanElev = max(ly / sqrt(max(1.0 - ly * ly, 1e-4)), 1e-3);
+    float b = _PCSS_DepthBias + _PCSS_SlopeBiasScale * radiusUV / tanElev;
+    // grazing時の暴走でピーターパン化しないよう上限クランプ
+    return min(b, 0.05);
+}
+
+// 受光面から見た遮蔽物との正の深度ギャップ (半影推定用)
+float DepthGap(float blockerZ, float receiverZ)
+{
+    if (_PCSS_ReversedZ != 0)
+        return max(blockerZ - receiverZ, 0.0);
+    else
+        return max(receiverZ - blockerZ, 0.0);
+}
+
+// 距離フェード (URP互換: 遠方の影を消す)
+float MainLightShadowFade(float3 positionWS)
+{
+    float3 camToPixel = positionWS - _PCSS_CameraPosWS.xyz;
+    float distSq = dot(camToPixel, camToPixel);
+    float fade = distSq * _MainLightShadowParams.z + _MainLightShadowParams.w;
+    return saturate(fade);
+}
+
+// =============================================================================
+// 指定カスケードでスクリーン空間PCSSを実行し、生のライト率(1=光,0=影)を返す。
+//   valid : positionWS がこのカスケードのシャドウ範囲外なら false (戻り値は1.0)。
+//   strength/fade は呼び出し側で一律に適用する(カスケードブレンドのため)。
+// =============================================================================
+float SampleCascadePCSS(float3 positionWS, uint cascadeIndex, uint2 pixel, float angle,
+                        float texel, float searchRadius, float biasSearch, out bool valid)
+{
+    float3 shadowCoord = WorldToShadowCoord(positionWS, cascadeIndex);
+
+    // シャドウ範囲外は光
+    if (shadowCoord.z <= 0.0 || shadowCoord.z >= 1.0 ||
+        shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
+        shadowCoord.y < 0.0 || shadowCoord.y > 1.0)
+    {
+        valid = false;
+        return 1.0;
+    }
+    valid = true;
+
+    float2 shadowUV  = shadowCoord.xy;
+    float  receiverZ = shadowCoord.z;
+
+    // --- [Early-Out 最適化] 周辺3x3チェック --------------------------------
+    float neighborShadow = 0.0;
+    [unroll]
+    for (int ny = -1; ny <= 1; ny++)
+    {
+        [unroll]
+        for (int nx = -1; nx <= 1; nx++)
+        {
+            float2 nUV = shadowUV + float2(nx, ny) * searchRadius;
+            float  s   = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, nUV, 0);
+            neighborShadow += IsBlocker(s, receiverZ, biasSearch) ? 1.0 : 0.0;
+        }
+    }
+
+    if (neighborShadow == 0.0) return 1.0;   // 全て光
+    if (neighborShadow == 9.0) return 0.0;   // 全て影 (根元の硬さ維持)
+
+    // --- [Blocker 検索] (blockerSearchRadius : 小) -------------------------
+    float blockerSum = 0.0;
+    int   blockerCount = 0;
+    [unroll]
+    for (int i = 0; i < N_SAMPLE; i++)
+    {
+        float2 offset = RotateVec2(poissonDisk[i], angle) * searchRadius;
+        float  s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
+        if (IsBlocker(s, receiverZ, biasSearch))
+        {
+            blockerSum += s;
+            blockerCount++;
+        }
+    }
+
+    if (blockerCount == 0) return 1.0;       // 遮蔽物なし -> 完全な光
+
+    float avgBlockerZ = blockerSum / blockerCount;
+
+    // --- [半影サイズ推定] 相似三角形 ---------------------------------------
+    float gap = DepthGap(avgBlockerZ, receiverZ);
+    float penumbra = gap / max(avgBlockerZ, 1e-4);
+    penumbra *= (1.0 + gap * _PCSS_FarSoftness);
+    float filterRadius = penumbra * _PCSS_LightSize * _PCSS_PCFFilterRadius * texel;
+    filterRadius = clamp(filterRadius, texel, _PCSS_MaxFilterRadius);
+
+    // --- [PCF フィルタリング] (pcfFilterRadius : 大) -----------------------
+    float litSum = 0.0;
+    [unroll]
+    for (int j = 0; j < N_SAMPLE; j++)
+    {
+        float2 offset = RotateVec2(poissonDisk[j], angle) * filterRadius;
+        float  s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
+        litSum += IsBlocker(s, receiverZ, biasSearch) ? 0.0 : 1.0;
+    }
+
+    return litSum / N_SAMPLE;
+}
+
+// =============================================================================
+// Kernel 0 : PCSS 本体 + カスケード境界ブレンド
+// =============================================================================
+[numthreads(8, 8, 1)]
+void CSMainPCSS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_PCSS_TextureSize.x || id.y >= (uint)_PCSS_TextureSize.y)
+        return;
+
+    float2 screenUV = (id.xy + 0.5) * _PCSS_TextureSize.zw;
+
+    // --- 深度 -> World 復元 -------------------------------------------------
+    float rawDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, screenUV, 0);
+
+    // 空(スカイボックス)は影を受けない。reversed-Z では far=0, 通常では far=1。
+    bool isSky = (_PCSS_ReversedZ != 0) ? (rawDepth <= 0.0) : (rawDepth >= 1.0);
+    if (isSky)
+    {
+        _RawShadowResult[id.xy] = 1.0;
+        return;
+    }
+
+    float3 positionWS = ComputeWorldPosition(screenUV, rawDepth);
+
+    // --- 共通パラメータ -----------------------------------------------------
+    float texel        = _PCSS_ShadowTexelSize;
+    float searchRadius = _PCSS_BlockerSearchRadius * texel;
+    float biasSearch   = ReceiverBias(searchRadius);
+    float angle        = GetRotationAngle(id.xy);
+
+    // --- カスケード特定 ------------------------------------------------------
+    uint cascadeA = ComputeCascadeIndex(positionWS);
+
+    bool validA;
+    float lit = SampleCascadePCSS(positionWS, cascadeA, id.xy, angle, texel, searchRadius, biasSearch, validA);
+
+    // --- カスケード境界ブレンド (隣の遠いカスケードへ滑らかに移行) ----------
+    if (_PCSS_CascadeBorder > 0.0 && _PCSS_CascadeCount > 1 && (cascadeA + 1) < (uint)_PCSS_CascadeCount)
+    {
+        float4 sphere = GetCascadeSphere(cascadeA);
+        float  t = distance(positionWS, sphere.xyz) / max(sphere.w, 1e-4); // 0=中心, 1=球の縁
+        float  blend = saturate((t - (1.0 - _PCSS_CascadeBorder)) / max(_PCSS_CascadeBorder, 1e-3));
+        if (blend > 0.0)
+        {
+            bool validB;
+            float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, biasSearch, validB);
+            if (validB)
+                lit = lerp(lit, litB, blend);
+        }
+    }
+
+    // --- 影の強さ適用 + 距離フェード ---------------------------------------
+    float shadowFade = MainLightShadowFade(positionWS);
+    float strength   = _MainLightShadowParams.x;
+    float litFraction = lerp(1.0 - strength * (1.0 - lit), 1.0, shadowFade);
+
+    _RawShadowResult[id.xy] = saturate(litFraction);
+}
+
+// =============================================================================
+// Kernel 1 : バイラテラルフィルタ (World距離重み 3x3)
+//   サンプリングノイズを消しつつ、段差(接地部)の影をシャープに保つ。
+// =============================================================================
+[numthreads(8, 8, 1)]
+void CSBilateral(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_PCSS_TextureSize.x || id.y >= (uint)_PCSS_TextureSize.y)
+        return;
+
+    float2 centerUV   = (id.xy + 0.5) * _PCSS_TextureSize.zw;
+    float  centerDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, centerUV, 0);
+    float3 centerWS    = ComputeWorldPosition(centerUV, centerDepth);
+
+    float weightSum = 0.0;
+    float shadowSum = 0.0;
+
+    [unroll]
+    for (int y = -1; y <= 1; y++)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; x++)
+        {
+            float2 sampleUV    = centerUV + float2(x, y) * _PCSS_TextureSize.zw;
+            float  sampleDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, sampleUV, 0);
+            float3 sampleWS    = ComputeWorldPosition(sampleUV, sampleDepth);
+
+            // 3D空間上の距離が離れている(段差)場合は重みを落とす
+            float distWS = distance(centerWS, sampleWS);
+            float weight = exp(-distWS * distWS * _PCSS_BilateralSharpness);
+
+            float s = _RawShadowResultTex.SampleLevel(sampler_PointClamp, sampleUV, 0);
+            shadowSum += s * weight;
+            weightSum += weight;
+        }
+    }
+
+    _SSShadowResult[id.xy] = shadowSum / max(weightSum, 1e-4);
+}
