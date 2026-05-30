@@ -21,62 +21,62 @@
 // ---------------------------------------------------------------------------
 // リソース
 // ---------------------------------------------------------------------------
-Texture2D<float>    _CameraDepthTexture;          // カメラ深度 (raw device depth)
-Texture2D<float>    _MainLightShadowmapTexture;   // URPメインライト シャドウアトラス
-SamplerState        sampler_PointClamp;
+Texture2D<float> _CameraDepthTexture; // カメラ深度 (raw device depth)
+Texture2D<float> _MainLightShadowmapTexture; // URPメインライト シャドウアトラス
+SamplerState sampler_PointClamp;
 
-RWTexture2D<float>  _RawShadowResult;             // Kernel0 出力 / Kernel1 入力
-Texture2D<float>    _RawShadowResultTex;          // Kernel1 で読む用 (同一内容)
-RWTexture2D<float>  _SSShadowResult;              // Kernel1 出力 (最終)
+RWTexture2D<float> _RawShadowResult; // Kernel0 出力 / Kernel1 入力
+Texture2D<float> _RawShadowResultTex; // Kernel1 で読む用 (同一内容)
+RWTexture2D<float> _SSShadowResult; // Kernel1 出力 (最終)
 
-Texture2D<float4>   _PCSS_BlueNoiseTex;           // ブルーノイズ (回転角ディザ用)
+Texture2D<float4> _PCSS_BlueNoiseTex; // ブルーノイズ (回転角ディザ用)
 
 // ---------------------------------------------------------------------------
 // URPがグローバル設定するシャドウ変数 (非破壊取得)
 // MainLightShadowCasterPass.SetShadowmapData() がフレーム毎に設定する。
 // ---------------------------------------------------------------------------
 float4x4 _MainLightWorldToShadow[5];
-float4   _CascadeShadowSplitSpheres0;   // xyz=中心, w=半径
-float4   _CascadeShadowSplitSpheres1;
-float4   _CascadeShadowSplitSpheres2;
-float4   _CascadeShadowSplitSpheres3;
-float4   _MainLightShadowParams;        // x=strength, y=soft, z=fadeScale, w=fadeBias
+float4 _CascadeShadowSplitSpheres0; // xyz=中心, w=半径
+float4 _CascadeShadowSplitSpheres1;
+float4 _CascadeShadowSplitSpheres2;
+float4 _CascadeShadowSplitSpheres3;
+float4 _MainLightShadowParams; // x=strength, y=soft, z=fadeScale, w=fadeBias
 
 // ---------------------------------------------------------------------------
 // C#から設定するパラメータ
 // ---------------------------------------------------------------------------
-float4x4 _PCSS_InvViewProj;       // ワールド復元用 逆ViewProj (GPU clip space)
-float4   _PCSS_CameraPosWS;        // カメラ ワールド座標 (xyz)
-float4   _PCSS_TextureSize;        // x=width, y=height, z=1/width, w=1/height (出力RT)
-float    _PCSS_ShadowTexelSize;    // 1.0 / シャドウアトラス解像度(幅)
-int      _PCSS_CascadeCount;       // カスケード数
-float    _PCSS_CascadeBorder;      // カスケード境界ブレンド幅(0〜1)。0で無効
-float    _PCSS_BlockerSearchRadius;// 遮蔽検索半径 (小さめ)
-float    _PCSS_PCFFilterRadius;    // ぼかし半径乗数 (大きめ)
-float    _PCSS_LightSize;          // ライトサイズ (半影の広がり強度)
-float    _PCSS_DepthBias;          // シャドウ深度バイアス (アクネ対策)
-float    _PCSS_MaxFilterRadius;    // フィルタ半径の最大値 (アトラスUV単位)
-float    _PCSS_BilateralSharpness; // バイラテラル距離係数 (大=シャープ)
-float    _PCSS_FarSoftness;        // 遠方(影の先端)のボケ強調。0=従来通り(線形)
-float3   _PCSS_LightDirection;     // ライトへ向かう方向(正規化, world)。傾斜バイアス用
-float    _PCSS_SlopeBiasScale;     // 傾斜バイアス係数。フィルタ半径×1/tan(仰角)に比例
-float2   _PCSS_BlueNoiseSize;      // ブルーノイズテクスチャの解像度(w,h)
-int      _PCSS_UseBlueNoise;       // 1=ブルーノイズ使用 / 0=IGNフォールバック
-int      _PCSS_ReversedZ;          // 1=reversed-Z (D3D/Vulkan/Metal), 0=通常(GL)
+float4x4 _PCSS_InvViewProj; // ワールド復元用 逆ViewProj (GPU clip space)
+float4 _PCSS_CameraPosWS; // カメラ ワールド座標 (xyz)
+float4 _PCSS_TextureSize; // x=width, y=height, z=1/width, w=1/height (出力RT)
+float _PCSS_ShadowTexelSize; // 1.0 / シャドウアトラス解像度(幅)
+int _PCSS_CascadeCount; // カスケード数
+float _PCSS_CascadeBorder; // カスケード境界ブレンド幅(0〜1)。0で無効
+float _PCSS_BlockerSearchRadius; // 遮蔽検索半径 (小さめ)
+float _PCSS_PCFFilterRadius; // ぼかし半径乗数 (大きめ)
+float _PCSS_LightSize; // ライトサイズ (半影の広がり強度)
+float _PCSS_DepthBias; // シャドウ深度バイアス (アクネ対策)
+float _PCSS_MaxFilterRadius; // フィルタ半径の最大値 (アトラスUV単位)
+float _PCSS_BilateralSharpness; // バイラテラル距離係数 (大=シャープ)
+float _PCSS_FarSoftness; // 遠方(影の先端)のボケ強調。0=従来通り(線形)
+float3 _PCSS_LightDirection; // ライトへ向かう方向(正規化, world)。傾斜バイアス用
+float _PCSS_SlopeBiasScale; // 傾斜バイアス係数。フィルタ半径×1/tan(仰角)に比例
+float2 _PCSS_BlueNoiseSize; // ブルーノイズテクスチャの解像度(w,h)
+int _PCSS_UseBlueNoise; // 1=ブルーノイズ使用 / 0=IGNフォールバック
+int _PCSS_ReversedZ; // 1=reversed-Z (D3D/Vulkan/Metal), 0=通常(GL)
 
 // ---------------------------------------------------------------------------
 // ポアソンディスク (16点)
 // ---------------------------------------------------------------------------
 static const float2 poissonDisk[N_SAMPLE] =
 {
-    float2(-0.94201624, -0.39906216), float2( 0.94558609, -0.76890725),
-    float2(-0.09418410, -0.92938870), float2( 0.34495938,  0.29387760),
-    float2(-0.91588581,  0.45771432), float2(-0.81544232, -0.87912464),
-    float2(-0.38277543,  0.27676845), float2( 0.97484398,  0.75648379),
-    float2( 0.44323325, -0.97511554), float2( 0.53742981, -0.47373420),
-    float2(-0.26496911, -0.41893023), float2( 0.79197514,  0.19090188),
-    float2(-0.24188840,  0.99706507), float2(-0.81409955,  0.91437590),
-    float2( 0.19984126,  0.78641367), float2( 0.14383161, -0.14100790)
+    float2(-0.94201624, -0.39906216), float2(0.94558609, -0.76890725),
+    float2(-0.09418410, -0.92938870), float2(0.34495938, 0.29387760),
+    float2(-0.91588581, 0.45771432), float2(-0.81544232, -0.87912464),
+    float2(-0.38277543, 0.27676845), float2(0.97484398, 0.75648379),
+    float2(0.44323325, -0.97511554), float2(0.53742981, -0.47373420),
+    float2(-0.26496911, -0.41893023), float2(0.79197514, 0.19090188),
+    float2(-0.24188840, 0.99706507), float2(-0.81409955, 0.91437590),
+    float2(0.19984126, 0.78641367), float2(0.14383161, -0.14100790)
 };
 
 // 2x2ブロックでシードを共有し、チラつきを防ぐノイズ (フォールバック用)
@@ -135,8 +135,8 @@ uint ComputeCascadeIndex(float3 positionWS)
 
     float4 distSq = float4(dot(fromCenter0, fromCenter0), dot(fromCenter1, fromCenter1),
                            dot(fromCenter2, fromCenter2), dot(fromCenter3, fromCenter3));
-    float4 radii  = float4(_CascadeShadowSplitSpheres0.w, _CascadeShadowSplitSpheres1.w,
-                           _CascadeShadowSplitSpheres2.w, _CascadeShadowSplitSpheres3.w);
+    float4 radii = float4(_CascadeShadowSplitSpheres0.w, _CascadeShadowSplitSpheres1.w,
+                          _CascadeShadowSplitSpheres2.w, _CascadeShadowSplitSpheres3.w);
     float4 radiiSq = radii * radii;
 
     float4 weights = float4(distSq < radiiSq);
@@ -221,8 +221,8 @@ float SampleCascadePCSS(float3 positionWS, uint cascadeIndex, uint2 pixel, float
     }
     valid = true;
 
-    float2 shadowUV  = shadowCoord.xy;
-    float  receiverZ = shadowCoord.z;
+    float2 shadowUV = shadowCoord.xy;
+    float receiverZ = shadowCoord.z;
 
     // --- [Early-Out 最適化] 周辺3x3チェック --------------------------------
     float neighborShadow = 0.0;
@@ -233,22 +233,22 @@ float SampleCascadePCSS(float3 positionWS, uint cascadeIndex, uint2 pixel, float
         for (int nx = -1; nx <= 1; nx++)
         {
             float2 nUV = shadowUV + float2(nx, ny) * searchRadius;
-            float  s   = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, nUV, 0);
+            float s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, nUV, 0);
             neighborShadow += IsBlocker(s, receiverZ, biasSearch) ? 1.0 : 0.0;
         }
     }
 
-    if (neighborShadow == 0.0) return 1.0;   // 全て光
-    if (neighborShadow == 9.0) return 0.0;   // 全て影 (根元の硬さ維持)
+    if (neighborShadow == 0.0) return 1.0; // 全て光
+    if (neighborShadow == 9.0) return 0.0; // 全て影 (根元の硬さ維持)
 
     // --- [Blocker 検索] (blockerSearchRadius : 小) -------------------------
     float blockerSum = 0.0;
-    int   blockerCount = 0;
+    int blockerCount = 0;
     [unroll]
     for (int i = 0; i < N_SAMPLE; i++)
     {
         float2 offset = RotateVec2(poissonDisk[i], angle) * searchRadius;
-        float  s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
+        float s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
         if (IsBlocker(s, receiverZ, biasSearch))
         {
             blockerSum += s;
@@ -256,7 +256,7 @@ float SampleCascadePCSS(float3 positionWS, uint cascadeIndex, uint2 pixel, float
         }
     }
 
-    if (blockerCount == 0) return 1.0;       // 遮蔽物なし -> 完全な光
+    if (blockerCount == 0) return 1.0; // 遮蔽物なし -> 完全な光
 
     float avgBlockerZ = blockerSum / blockerCount;
 
@@ -273,7 +273,7 @@ float SampleCascadePCSS(float3 positionWS, uint cascadeIndex, uint2 pixel, float
     for (int j = 0; j < N_SAMPLE; j++)
     {
         float2 offset = RotateVec2(poissonDisk[j], angle) * filterRadius;
-        float  s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
+        float s = _MainLightShadowmapTexture.SampleLevel(sampler_PointClamp, shadowUV + offset, 0);
         litSum += IsBlocker(s, receiverZ, biasSearch) ? 0.0 : 1.0;
     }
 
@@ -305,10 +305,10 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     float3 positionWS = ComputeWorldPosition(screenUV, rawDepth);
 
     // --- 共通パラメータ -----------------------------------------------------
-    float texel        = _PCSS_ShadowTexelSize;
+    float texel = _PCSS_ShadowTexelSize;
     float searchRadius = _PCSS_BlockerSearchRadius * texel;
-    float biasSearch   = ReceiverBias(searchRadius);
-    float angle        = GetRotationAngle(id.xy);
+    float biasSearch = ReceiverBias(searchRadius);
+    float angle = GetRotationAngle(id.xy);
 
     // --- カスケード特定 ------------------------------------------------------
     uint cascadeA = ComputeCascadeIndex(positionWS);
@@ -320,12 +320,13 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     if (_PCSS_CascadeBorder > 0.0 && _PCSS_CascadeCount > 1 && (cascadeA + 1) < (uint)_PCSS_CascadeCount)
     {
         float4 sphere = GetCascadeSphere(cascadeA);
-        float  t = distance(positionWS, sphere.xyz) / max(sphere.w, 1e-4); // 0=中心, 1=球の縁
-        float  blend = saturate((t - (1.0 - _PCSS_CascadeBorder)) / max(_PCSS_CascadeBorder, 1e-3));
+        float t = distance(positionWS, sphere.xyz) / max(sphere.w, 1e-4); // 0=中心, 1=球の縁
+        float blend = saturate((t - (1.0 - _PCSS_CascadeBorder)) / max(_PCSS_CascadeBorder, 1e-3));
         if (blend > 0.0)
         {
             bool validB;
-            float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, biasSearch, validB);
+            float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, biasSearch,
+                                           validB);
             if (validB)
                 lit = lerp(lit, litB, blend);
         }
@@ -333,7 +334,7 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
 
     // --- 影の強さ適用 + 距離フェード ---------------------------------------
     float shadowFade = MainLightShadowFade(positionWS);
-    float strength   = _MainLightShadowParams.x;
+    float strength = _MainLightShadowParams.x;
     float litFraction = lerp(1.0 - strength * (1.0 - lit), 1.0, shadowFade);
 
     _RawShadowResult[id.xy] = saturate(litFraction);
@@ -349,9 +350,9 @@ void CSBilateral(uint3 id : SV_DispatchThreadID)
     if (id.x >= (uint)_PCSS_TextureSize.x || id.y >= (uint)_PCSS_TextureSize.y)
         return;
 
-    float2 centerUV   = (id.xy + 0.5) * _PCSS_TextureSize.zw;
-    float  centerDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, centerUV, 0);
-    float3 centerWS    = ComputeWorldPosition(centerUV, centerDepth);
+    float2 centerUV = (id.xy + 0.5) * _PCSS_TextureSize.zw;
+    float centerDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, centerUV, 0);
+    float3 centerWS = ComputeWorldPosition(centerUV, centerDepth);
 
     float weightSum = 0.0;
     float shadowSum = 0.0;
@@ -362,9 +363,9 @@ void CSBilateral(uint3 id : SV_DispatchThreadID)
         [unroll]
         for (int x = -1; x <= 1; x++)
         {
-            float2 sampleUV    = centerUV + float2(x, y) * _PCSS_TextureSize.zw;
-            float  sampleDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, sampleUV, 0);
-            float3 sampleWS    = ComputeWorldPosition(sampleUV, sampleDepth);
+            float2 sampleUV = centerUV + float2(x, y) * _PCSS_TextureSize.zw;
+            float sampleDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, sampleUV, 0);
+            float3 sampleWS = ComputeWorldPosition(sampleUV, sampleDepth);
 
             // 3D空間上の距離が離れている(段差)場合は重みを落とす
             float distWS = distance(centerWS, sampleWS);
