@@ -41,6 +41,18 @@ float2 RotateVec2(float2 v, float angle)
     return float2(v.x * c + v.y * s, -v.x * s + v.y * c);
 }
 
+// Rotated Fibonacci (sunflower) spiral disk sample in the unit disk. Uniform
+// coverage for any 'count', far less clumpy than a small fixed Poisson set, so
+// it stays clean at low tap counts without TAA. 'angleOffset' is the per-pixel
+// rotation (blue noise / IGN) that decorrelates neighbouring pixels.
+float2 SampleDiskFibonacci(uint i, uint count, float angleOffset)
+{
+    float fi = (float)i;
+    float r = sqrt((fi + 0.5) / (float)count);
+    float theta = fi * GOLDEN_ANGLE + angleOffset;
+    return r * float2(cos(theta), sin(theta));
+}
+
 // Reconstruct world position from screen UV and raw device depth. Reuses
 // _PCSS_ReversedZ for the clip-space Y flip (matches the C# renderIntoTexture proj).
 float3 ComputeWorldPosition(float2 screenUV, float rawDepth)

@@ -9,15 +9,18 @@ namespace PCSS.Runtime
     {
         // Kernel names.
         public const string KernelReconnaissance = "CSReconnaissance";
+        public const string KernelBlurMask = "CSBlurMask";
         public const string KernelMainPCSS = "CSMainPCSS";
+        public const string KernelDenoise = "CSDenoise";
 
         // Textures.
         public static readonly int CameraDepth = Shader.PropertyToID("_CameraDepthTexture");
         public static readonly int ShadowmapTex = Shader.PropertyToID("_MainLightShadowmapTexture");
         public static readonly int BlueNoiseTex = Shader.PropertyToID("_PCSS_BlueNoiseTex");
-        public static readonly int MaskResult = Shader.PropertyToID("_PCSS_MaskResult"); // kernel 0 output
-        public static readonly int MaskTex = Shader.PropertyToID("_PCSS_MaskTex"); // kernel 1 input
-        public static readonly int SSResult = Shader.PropertyToID("_SSShadowResult"); // kernel 1 output
+        public static readonly int MaskResult = Shader.PropertyToID("_PCSS_MaskResult"); // recon/blur output
+        public static readonly int MaskTex = Shader.PropertyToID("_PCSS_MaskTex"); // mask input
+        public static readonly int SSResult = Shader.PropertyToID("_SSShadowResult"); // PCSS/denoise output
+        public static readonly int ShadowRawTex = Shader.PropertyToID("_PCSS_ShadowRawTex"); // denoise input
 
         // URP screen-space shadow slot. The PCSS result is bound here so all
         // standard URP materials (Lit, SimpleLit, etc.) receive PCSS via URP's
@@ -59,5 +62,7 @@ namespace PCSS.Runtime
         public static readonly int JitterIndex = Shader.PropertyToID("_PCSS_JitterIndex");
         public static readonly int Stabilize = Shader.PropertyToID("_PCSS_StabilizeSampling");
         public static readonly int ReversedZ = Shader.PropertyToID("_PCSS_ReversedZ");
+        public static readonly int SampleCount = Shader.PropertyToID("_PCSS_SampleCount");
+        public static readonly int DenoiseDepthSigma = Shader.PropertyToID("_PCSS_DenoiseDepthSigma");
     }
 }

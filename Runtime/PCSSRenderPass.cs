@@ -6,10 +6,8 @@ using UnityEngine.Rendering.Universal;
 
 namespace PCSS.Runtime
 {
-    // RenderGraph compute pass: builds the screen-space PCSS shadow map in two
-    // dispatches (1/4-res reconnaissance mask -> full-res physical PCSS), binds it
-    // to URP's _ScreenSpaceShadowmapTexture slot, and enables the keyword trio so
-    // all standard URP materials sample it via _MAIN_LIGHT_SHADOWS_SCREEN.
+    [DisallowMultipleRendererFeature("PCSS (Screen Space)")]
+    [Tooltip("PCSS (Screen Space)")]
     internal class PCSSRenderPass : ScriptableRenderPass
     {
         private readonly PCSSSettings m_Settings;
@@ -21,7 +19,7 @@ namespace PCSS.Runtime
         public PCSSRenderPass(PCSSSettings settings)
         {
             m_Settings = settings;
-            profilingSampler = new ProfilingSampler("Advanced PCSS (Screen Space)");
+            profilingSampler = new ProfilingSampler("PCSS (Screen Space)");
         }
 
         public void Dispose()
@@ -35,12 +33,18 @@ namespace PCSS.Runtime
         {
             public ComputeShader cs;
             public int kernelRecon;
+            public int kernelBlur;
             public int kernelPCSS;
+            public int kernelDenoise;
+            public bool blurMask;
+            public bool denoise;
 
             public TextureHandle cameraDepth;
             public TextureHandle shadowmap;
             public TextureHandle mask;
+            public TextureHandle maskBlur;
             public TextureHandle finalResult;
+            public TextureHandle shadowDenoised;
             public TextureHandle blueNoise;
 
             public int width;
@@ -66,6 +70,8 @@ namespace PCSS.Runtime
             public Vector4 lightDirection;
             public float slopeBiasScale;
             public int stabilizeSampling;
+            public int sampleCount;
+            public float denoiseDepthSigma;
 
             public Vector4 blueNoiseSize;
             public int useBlueNoise;
@@ -102,8 +108,11 @@ namespace PCSS.Runtime
             if (width <= 0 || height <= 0)
                 return;
 
-            int maskWidth = Mathf.Max(1, Mathf.CeilToInt(width / 4.0f));
-            int maskHeight = Mathf.Max(1, Mathf.CeilToInt(height / 4.0f));
+            int maskDiv = Mathf.Max(1, (int)m_Settings.maskResolution);
+            int maskWidth = Mathf.Max(1, Mathf.CeilToInt(width / (float)maskDiv));
+            int maskHeight = Mathf.Max(1, Mathf.CeilToInt(height / (float)maskDiv));
+            bool blurMask = m_Settings.blurMask;
+            bool denoise = m_Settings.denoise;
 
             var finalDesc = new TextureDesc(width, height)
             {
@@ -116,8 +125,18 @@ namespace PCSS.Runtime
             };
             TextureHandle finalResult = renderGraph.CreateTexture(finalDesc);
 
-            // Quarter-res reconnaissance mask. Bilinear so the full-res pass's
-            // interpolated read fattens penumbra boundaries for free.
+            // Optional denoised copy. When on, the raw PCSS goes to finalResult and
+            // CSDenoise writes the cleaned result that URP actually samples.
+            TextureHandle shadowDenoised = default;
+            if (denoise)
+            {
+                finalDesc.name = "_PCSS_ScreenSpaceShadowDenoised";
+                shadowDenoised = renderGraph.CreateTexture(finalDesc);
+            }
+            TextureHandle ssShadowOutput = denoise ? shadowDenoised : finalResult;
+
+            // Reconnaissance mask (resolution from settings). Bilinear so the
+            // full-res pass's interpolated read fattens penumbra boundaries for free.
             var maskDesc = new TextureDesc(maskWidth, maskHeight)
             {
                 format = GraphicsFormat.R8_UNorm,
@@ -129,11 +148,19 @@ namespace PCSS.Runtime
             };
             TextureHandle mask = renderGraph.CreateTexture(maskDesc);
 
+            // Optional blurred copy of the recon mask (smooths the penumbra gate).
+            TextureHandle maskBlur = default;
+            if (blurMask)
+            {
+                maskDesc.name = "_PCSS_ReconMaskBlur";
+                maskBlur = renderGraph.CreateTexture(maskDesc);
+            }
+
             // Publish handles so the optional debug pass (recorded at a later event)
             // can read them within this frame's graph.
             var pcssResources = frameData.GetOrCreate<PCSSResources>();
             pcssResources.mask = mask;
-            pcssResources.shadow = finalResult;
+            pcssResources.shadow = ssShadowOutput;
 
             // RenderGraph path cannot use the public GetGPUProjectionMatrix(), so
             // build the GPU projection here. renderIntoTexture:true pairs with the
@@ -158,12 +185,18 @@ namespace PCSS.Runtime
             {
                 passData.cs = m_Settings.computeShader;
                 passData.kernelRecon = m_Settings.computeShader.FindKernel(PCSSShaderIDs.KernelReconnaissance);
+                passData.kernelBlur = m_Settings.computeShader.FindKernel(PCSSShaderIDs.KernelBlurMask);
                 passData.kernelPCSS = m_Settings.computeShader.FindKernel(PCSSShaderIDs.KernelMainPCSS);
+                passData.kernelDenoise = m_Settings.computeShader.FindKernel(PCSSShaderIDs.KernelDenoise);
+                passData.blurMask = blurMask;
+                passData.denoise = denoise;
 
                 passData.cameraDepth = resourceData.cameraDepthTexture;
                 passData.shadowmap = resourceData.mainShadowsTexture;
                 passData.mask = mask;
+                passData.maskBlur = maskBlur;
                 passData.finalResult = finalResult;
+                passData.shadowDenoised = shadowDenoised;
                 passData.blueNoise = blueNoiseHandle;
 
                 passData.width = width;
@@ -189,6 +222,8 @@ namespace PCSS.Runtime
                 passData.lightDirection = lightDir;
                 passData.slopeBiasScale = m_Settings.slopeBias;
                 passData.stabilizeSampling = m_Settings.stabilizeSampling ? 1 : 0;
+                passData.sampleCount = Mathf.Max(1, m_Settings.sampleCount);
+                passData.denoiseDepthSigma = m_Settings.denoiseDepthSensitivity;
 
                 passData.blueNoiseSize = new Vector4(noiseSource.width, noiseSource.height, 0, 0);
                 passData.useBlueNoise = wantBlueNoise ? 1 : 0;
@@ -197,8 +232,13 @@ namespace PCSS.Runtime
                 builder.UseTexture(passData.cameraDepth, AccessFlags.Read);
                 builder.UseTexture(passData.shadowmap, AccessFlags.Read);
                 builder.UseTexture(passData.blueNoise, AccessFlags.Read);
-                builder.UseTexture(passData.mask, AccessFlags.ReadWrite); // kernel 0 writes -> kernel 1 reads
-                builder.UseTexture(passData.finalResult, AccessFlags.Write);
+                builder.UseTexture(passData.mask, AccessFlags.ReadWrite); // kernel 0 writes -> blur/kernel 1 reads
+                if (blurMask)
+                    builder.UseTexture(passData.maskBlur, AccessFlags.ReadWrite); // blur writes -> kernel 1 reads
+                // Raw PCSS: written by kernel 1, and (when denoising) read by CSDenoise.
+                builder.UseTexture(passData.finalResult, denoise ? AccessFlags.ReadWrite : AccessFlags.Write);
+                if (denoise)
+                    builder.UseTexture(passData.shadowDenoised, AccessFlags.Write); // denoise output
 
                 // The compute shader reads URP's per-frame global shadow vars.
                 builder.AllowGlobalStateModification(true);
@@ -207,9 +247,9 @@ namespace PCSS.Runtime
                 // The consumer is a material outside the graph; never cull this pass.
                 builder.AllowPassCulling(false);
 
-                // Bind the PCSS result to URP's screen-space shadow slot so all
-                // standard materials read it through _MAIN_LIGHT_SHADOWS_SCREEN.
-                builder.SetGlobalTextureAfterPass(finalResult, PCSSShaderIDs.UrpScreenSpaceShadowmap);
+                // Bind the (denoised) PCSS result to URP's screen-space shadow slot
+                // so all standard materials read it through _MAIN_LIGHT_SHADOWS_SCREEN.
+                builder.SetGlobalTextureAfterPass(ssShadowOutput, PCSSShaderIDs.UrpScreenSpaceShadowmap);
 
                 builder.SetRenderFunc((PassData data, ComputeGraphContext ctx) => ExecutePass(data, ctx));
             }
@@ -222,7 +262,7 @@ namespace PCSS.Runtime
             using (var kwBuilder = renderGraph.AddUnsafePass<KeywordPassData>(
                        "PCSS Enable SS Shadow Keywords", out _, profilingSampler))
             {
-                kwBuilder.UseTexture(finalResult, AccessFlags.Read);
+                kwBuilder.UseTexture(ssShadowOutput, AccessFlags.Read);
                 kwBuilder.AllowGlobalStateModification(true);
                 kwBuilder.AllowPassCulling(false);
                 kwBuilder.SetRenderFunc((KeywordPassData _, UnsafeGraphContext ctx) =>
@@ -261,26 +301,53 @@ namespace PCSS.Runtime
             cmd.SetComputeVectorParam(cs, PCSSShaderIDs.BlueNoiseSize, data.blueNoiseSize);
             cmd.SetComputeIntParam(cs, PCSSShaderIDs.UseBlueNoise, data.useBlueNoise);
             cmd.SetComputeIntParam(cs, PCSSShaderIDs.JitterIndex, data.jitterIndex);
+            cmd.SetComputeIntParam(cs, PCSSShaderIDs.SampleCount, data.sampleCount);
+            cmd.SetComputeFloatParam(cs, PCSSShaderIDs.DenoiseDepthSigma, data.denoiseDepthSigma);
 
-            // Kernel 0: reconnaissance (quarter res).
+            int maskGroupsX = Mathf.CeilToInt(data.maskWidth / 8.0f);
+            int maskGroupsY = Mathf.CeilToInt(data.maskHeight / 8.0f);
+
+            // Kernel 0: reconnaissance (mask res) -> recon mask.
             int k0 = data.kernelRecon;
             cmd.SetComputeTextureParam(cs, k0, PCSSShaderIDs.CameraDepth, data.cameraDepth);
             cmd.SetComputeTextureParam(cs, k0, PCSSShaderIDs.ShadowmapTex, data.shadowmap);
             cmd.SetComputeTextureParam(cs, k0, PCSSShaderIDs.MaskResult, data.mask);
-            cmd.DispatchCompute(cs, k0,
-                Mathf.CeilToInt(data.maskWidth / 8.0f),
-                Mathf.CeilToInt(data.maskHeight / 8.0f), 1);
+            cmd.DispatchCompute(cs, k0, maskGroupsX, maskGroupsY, 1);
 
-            // Kernel 1: physical PCSS (full res).
+            // Optional blur kernel (mask res): recon mask -> blurred mask.
+            // Reuses the MaskTex (SRV) / MaskResult (UAV) slots, rebound per dispatch.
+            TextureHandle k1MaskInput = data.mask;
+            if (data.blurMask)
+            {
+                int kb = data.kernelBlur;
+                cmd.SetComputeTextureParam(cs, kb, PCSSShaderIDs.MaskTex, data.mask);
+                cmd.SetComputeTextureParam(cs, kb, PCSSShaderIDs.MaskResult, data.maskBlur);
+                cmd.DispatchCompute(cs, kb, maskGroupsX, maskGroupsY, 1);
+                k1MaskInput = data.maskBlur;
+            }
+
+            // Kernel 1: physical PCSS (full res). Reads the (blurred) mask.
+            int fullGroupsX = Mathf.CeilToInt(data.width / 8.0f);
+            int fullGroupsY = Mathf.CeilToInt(data.height / 8.0f);
             int k1 = data.kernelPCSS;
             cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.CameraDepth, data.cameraDepth);
             cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.ShadowmapTex, data.shadowmap);
             cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.BlueNoiseTex, data.blueNoise);
-            cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.MaskTex, data.mask);
+            cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.MaskTex, k1MaskInput);
             cmd.SetComputeTextureParam(cs, k1, PCSSShaderIDs.SSResult, data.finalResult);
-            cmd.DispatchCompute(cs, k1,
-                Mathf.CeilToInt(data.width / 8.0f),
-                Mathf.CeilToInt(data.height / 8.0f), 1);
+            cmd.DispatchCompute(cs, k1, fullGroupsX, fullGroupsY, 1);
+
+            // Optional denoise (full res): raw PCSS -> depth-guided, penumbra-only blur.
+            // Reuses the SSResult (UAV) slot, rebound to the denoised target.
+            if (data.denoise)
+            {
+                int kd = data.kernelDenoise;
+                cmd.SetComputeTextureParam(cs, kd, PCSSShaderIDs.CameraDepth, data.cameraDepth);
+                cmd.SetComputeTextureParam(cs, kd, PCSSShaderIDs.MaskTex, k1MaskInput);
+                cmd.SetComputeTextureParam(cs, kd, PCSSShaderIDs.ShadowRawTex, data.finalResult);
+                cmd.SetComputeTextureParam(cs, kd, PCSSShaderIDs.SSResult, data.shadowDenoised);
+                cmd.DispatchCompute(cs, kd, fullGroupsX, fullGroupsY, 1);
+            }
         }
     }
 }

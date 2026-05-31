@@ -15,7 +15,9 @@
 // =============================================================================
 
 #pragma kernel CSReconnaissance
+#pragma kernel CSBlurMask
 #pragma kernel CSMainPCSS
+#pragma kernel CSDenoise
 
 #include "PCSSSampling.hlsl"
 
@@ -74,6 +76,40 @@ void CSReconnaissance(uint3 id : SV_DispatchThreadID)
 }
 
 // =============================================================================
+// Kernel : reconnaissance-mask blur (gate smoothing + penumbra dilation)
+// Reads the recon mask (_PCSS_MaskTex) and writes a 3x3 Gaussian-smoothed copy
+// (_PCSS_MaskResult). Smoothing the *gate* (not the shadow) removes the blocky
+// low-res staircase at the lit/penumbra/umbra boundary without softening the
+// shadow itself. Runs at mask resolution.
+// =============================================================================
+[numthreads(8, 8, 1)]
+void CSBlurMask(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_PCSS_MaskSize.x || id.y >= (uint)_PCSS_MaskSize.y)
+        return;
+
+    int2 maxCoord = int2((int)_PCSS_MaskSize.x - 1, (int)_PCSS_MaskSize.y - 1);
+
+    // Separable 1-2-1 Gaussian (3x3), clamped at the mask edges.
+    float sum = 0.0;
+    float wSum = 0.0;
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int2 c = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), maxCoord);
+            float w = (dx == 0 ? 2.0 : 1.0) * (dy == 0 ? 2.0 : 1.0);
+            sum += _PCSS_MaskTex.Load(int3(c, 0)) * w;
+            wSum += w;
+        }
+    }
+
+    _PCSS_MaskResult[id.xy] = sum / wSum;
+}
+
+// =============================================================================
 // Kernel 1 : physical PCSS (full res) + early-out + cascade-border blend
 // =============================================================================
 [numthreads(8, 8, 1)]
@@ -107,8 +143,14 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     float lit;
     if (maskV < 0.1)
     {
-        // Early-out: fully shadowed. Apply strength/fade only.
-        lit = 0.0;
+        // Non-penumbra (umbra) fast path: return a genuine shadow value via a
+        // cheap fixed-radius PCF instead of a hard 0. This keeps continuity with
+        // the penumbra gradient (no "pakkiri" black cut) while staying cheap.
+        float texel = _PCSS_ShadowTexelSize;
+        float angle = GetRotationAngle(id.xy);
+        uint cascadeU = ComputeCascadeIndex(positionWS);
+        bool validU;
+        lit = SampleHardShadowPCF(positionWS, cascadeU, angle, texel, validU);
     }
     else
     {
@@ -142,4 +184,63 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     float litFraction = lerp(1.0 - strength * (1.0 - lit), 1.0, shadowFade);
 
     _SSShadowResult[id.xy] = saturate(litFraction);
+}
+
+// =============================================================================
+// Kernel : depth-guided spatial denoise (replaces TAA when it is disabled)
+// A 3x3 cross-bilateral blur on the raw PCSS result, weighted by world-space
+// depth so it never leaks across geometry edges. Only the penumbra band is
+// touched (lit/umbra are already flat), so contact edges stay crisp and the
+// grain from low-sample PCSS without temporal accumulation is smoothed out.
+// =============================================================================
+[numthreads(8, 8, 1)]
+void CSDenoise(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_PCSS_TextureSize.x || id.y >= (uint)_PCSS_TextureSize.y)
+        return;
+
+    float center = _PCSS_ShadowRawTex.Load(int3(id.xy, 0));
+
+    // Penumbra-only: lit (>0.9) and umbra (<0.1) are flat — pass them through so
+    // their (continuous) values and any sharp contact edges are preserved.
+    float2 uv = (id.xy + 0.5) * _PCSS_TextureSize.zw;
+    float maskV = _PCSS_MaskTex.SampleLevel(sampler_LinearClamp, uv, 0);
+    if (maskV > 0.9 || maskV < 0.1)
+    {
+        _SSShadowResult[id.xy] = center;
+        return;
+    }
+
+    float rawC = _CameraDepthTexture.SampleLevel(sampler_PointClamp, uv, 0);
+    float3 posC = ComputeWorldPosition(uv, rawC);
+    float distCam = max(length(posC - _PCSS_CameraPosWS.xyz), 1e-3);
+    float sigmaW = max(distCam * _PCSS_DenoiseDepthSigma, 1e-4);
+    float invDenom = 1.0 / (2.0 * sigmaW * sigmaW);
+
+    int2 maxCoord = int2((int)_PCSS_TextureSize.x - 1, (int)_PCSS_TextureSize.y - 1);
+
+    float sum = 0.0;
+    float wSum = 0.0;
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int2 c = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), maxCoord);
+            float2 nuv = (float2(c) + 0.5) * _PCSS_TextureSize.zw;
+            float rawN = _CameraDepthTexture.SampleLevel(sampler_PointClamp, nuv, 0);
+            float3 posN = ComputeWorldPosition(nuv, rawN);
+
+            float wSpatial = (dx == 0 ? 2.0 : 1.0) * (dy == 0 ? 2.0 : 1.0);
+            float dW = distance(posC, posN);
+            float wDepth = exp(-(dW * dW) * invDenom);
+            float w = wSpatial * wDepth;
+
+            sum += _PCSS_ShadowRawTex.Load(int3(c, 0)) * w;
+            wSum += w;
+        }
+    }
+
+    _SSShadowResult[id.xy] = (wSum > 1e-5) ? (sum / wSum) : center;
 }
