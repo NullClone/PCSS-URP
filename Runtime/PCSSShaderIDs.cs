@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace PCSS.Runtime
 {
@@ -18,8 +19,24 @@ namespace PCSS.Runtime
         public static readonly int MaskTex = Shader.PropertyToID("_PCSS_MaskTex"); // kernel 1 input
         public static readonly int SSResult = Shader.PropertyToID("_SSShadowResult"); // kernel 1 output
 
-        // Output global texture consumed by receiver materials.
-        public static readonly int GlobalResult = Shader.PropertyToID("_CustomScreenSpaceShadowmap");
+        // URP screen-space shadow slot. The PCSS result is bound here so all
+        // standard URP materials (Lit, SimpleLit, etc.) receive PCSS via URP's
+        // built-in _MAIN_LIGHT_SHADOWS_SCREEN path — no custom receiver shader.
+        //
+        // Texture name verified from URP Shadows.hlsl:
+        //   TEXTURE2D_X(_ScreenSpaceShadowmapTexture)
+        public static readonly int UrpScreenSpaceShadowmap =
+            Shader.PropertyToID("_ScreenSpaceShadowmapTexture");
+
+        // Cached GlobalKeyword instances for cmd.SetKeyword() inside render passes.
+        // Matches ShaderGlobalKeywords.MainLightShadowScreen / .MainLightShadows /
+        // .MainLightShadowCascades used in URP's own ScreenSpaceShadows.cs.
+        // Keywords are managed as a trio (same as URP's ScreenSpaceShadowsPass):
+        //   enable  SCREEN + disable SHADOWS + disable CASCADES  → screen-space path
+        //   disable SCREEN + restore SHADOWS or CASCADES         → atlas path (PostPass)
+        public static readonly GlobalKeyword KwScreenSpaceShadows = new GlobalKeyword("_MAIN_LIGHT_SHADOWS_SCREEN");
+        public static readonly GlobalKeyword KwMainLightShadows = new GlobalKeyword("_MAIN_LIGHT_SHADOWS");
+        public static readonly GlobalKeyword KwMainLightCascades = new GlobalKeyword("_MAIN_LIGHT_SHADOWS_CASCADE");
 
         // Constants.
         public static readonly int InvViewProj = Shader.PropertyToID("_PCSS_InvViewProj");

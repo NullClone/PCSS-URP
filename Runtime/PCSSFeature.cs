@@ -12,8 +12,9 @@ namespace PCSS.Runtime
     //   2) Main PCSS (full res): run physical PCSS only on penumbra pixels.
     // No spatial blur; temporal jitter + the game's TAA resolve the noise.
     //
-    // The output stays named _CustomScreenSpaceShadowmap so existing receivers
-    // (PCSS_Receiver.hlsl / Shader Graph) keep working unchanged.
+    // The result is bound to URP's _ScreenSpaceShadowmapTexture and the
+    // _MAIN_LIGHT_SHADOWS_SCREEN keyword is enabled, so all standard URP materials
+    // (Lit, SimpleLit, etc.) receive PCSS automatically — no custom receiver shader.
     //
     // An optional debug pass blits a chosen intermediate buffer to the screen
     // (Scene/Game view) for inspection; see PCSSSettings.debugMode.
@@ -23,6 +24,7 @@ namespace PCSS.Runtime
 
         private PCSSRenderPass m_Pass;
         private PCSSDebugPass m_DebugPass;
+        private PCSSScreenSpaceShadowPostPass m_SsPostPass;
         private Material m_DebugMaterial;
         private bool m_DebugShaderWarned;
 
@@ -31,6 +33,10 @@ namespace PCSS.Runtime
             m_Pass = new PCSSRenderPass(settings);
             m_Pass.renderPassEvent = settings.renderPassEvent;
             m_DebugPass = new PCSSDebugPass();
+            // PostPass mirrors URP's ScreenSpaceShadowsPostPass: re-enables atlas
+            // keywords before transparent objects so they fall back to normal shadows.
+            m_SsPostPass = new PCSSScreenSpaceShadowPostPass();
+            m_SsPostPass.renderPassEvent = RenderPassEvent.BeforeRenderingTransparents;
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
@@ -45,6 +51,11 @@ namespace PCSS.Runtime
             m_Pass.renderPassEvent = settings.renderPassEvent;
             m_Pass.ConfigureInput(ScriptableRenderPassInput.Depth);
             renderer.EnqueuePass(m_Pass);
+
+            // PCSSRenderPass records an inline AddUnsafePass that enables the
+            // _MAIN_LIGHT_SHADOWS_SCREEN keyword trio; this post pass restores the
+            // atlas keywords before transparent objects render.
+            renderer.EnqueuePass(m_SsPostPass);
 
             if (settings.debugMode == PCSSDebugMode.None)
                 return;

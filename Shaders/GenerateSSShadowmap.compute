@@ -87,9 +87,8 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     // Bilinear mask read; interpolation fattens penumbra boundaries.
     float maskV = _PCSS_MaskTex.SampleLevel(sampler_LinearClamp, screenUV, 0);
 
-    // Early-out only for confidently uniform regions. Wider thresholds keep
-    // near-edge pixels in the full PCSS path, avoiding blocky 1/4-res cutouts.
-    if (maskV > 0.98)
+    // Early-out: fully lit.
+    if (maskV > 0.9)
     {
         _SSShadowResult[id.xy] = 1.0;
         return;
@@ -99,32 +98,41 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
     bool isSky = (_PCSS_ReversedZ != 0) ? (rawDepth <= 0.0) : (rawDepth >= 1.0);
     if (isSky)
     {
-        //_SSShadowResult[id.xy] = 1.0;
-        //return;
+        _SSShadowResult[id.xy] = 1.0;
+        return;
     }
 
     float3 positionWS = ComputeWorldPosition(screenUV, rawDepth);
 
-    float texel = _PCSS_ShadowTexelSize;
-    float searchRadius = _PCSS_BlockerSearchRadius * texel;
-    float angle = GetRotationAngle(id.xy);
-
-    uint cascadeA = ComputeCascadeIndex(positionWS);
-    bool validA;
-    float lit = SampleCascadePCSS(positionWS, cascadeA, id.xy, angle, texel, searchRadius, validA);
-
-    // Cascade-border blend: lerp into the next cascade near the sphere edge.
-    if (_PCSS_CascadeBorder > 0.0 && _PCSS_CascadeCount > 1 && (cascadeA + 1) < (uint)_PCSS_CascadeCount)
+    float lit;
+    if (maskV < 0.1)
     {
-        float4 sphere = GetCascadeSphere(cascadeA);
-        float t = distance(positionWS, sphere.xyz) / max(sphere.w, 1e-4);
-        float blend = saturate((t - (1.0 - _PCSS_CascadeBorder)) / max(_PCSS_CascadeBorder, 1e-3));
-        if (blend > 0.0)
+        // Early-out: fully shadowed. Apply strength/fade only.
+        lit = 0.0;
+    }
+    else
+    {
+        float texel = _PCSS_ShadowTexelSize;
+        float searchRadius = _PCSS_BlockerSearchRadius * texel;
+        float angle = GetRotationAngle(id.xy);
+
+        uint cascadeA = ComputeCascadeIndex(positionWS);
+        bool validA;
+        lit = SampleCascadePCSS(positionWS, cascadeA, id.xy, angle, texel, searchRadius, validA);
+
+        // Cascade-border blend: lerp into the next cascade near the sphere edge.
+        if (_PCSS_CascadeBorder > 0.0 && _PCSS_CascadeCount > 1 && (cascadeA + 1) < (uint)_PCSS_CascadeCount)
         {
-            bool validB;
-            float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, validB);
-            if (validB)
-                lit = lerp(lit, litB, blend);
+            float4 sphere = GetCascadeSphere(cascadeA);
+            float t = distance(positionWS, sphere.xyz) / max(sphere.w, 1e-4);
+            float blend = saturate((t - (1.0 - _PCSS_CascadeBorder)) / max(_PCSS_CascadeBorder, 1e-3));
+            if (blend > 0.0)
+            {
+                bool validB;
+                float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, validB);
+                if (validB)
+                    lit = lerp(lit, litB, blend);
+            }
         }
     }
 

@@ -7,8 +7,9 @@ using UnityEngine.Rendering.Universal;
 namespace PCSS.Runtime
 {
     // RenderGraph compute pass: builds the screen-space PCSS shadow map in two
-    // dispatches (1/4-res reconnaissance mask -> full-res physical PCSS) and
-    // publishes it as the global texture _CustomScreenSpaceShadowmap.
+    // dispatches (1/4-res reconnaissance mask -> full-res physical PCSS), binds it
+    // to URP's _ScreenSpaceShadowmapTexture slot, and enables the keyword trio so
+    // all standard URP materials sample it via _MAIN_LIGHT_SHADOWS_SCREEN.
     internal class PCSSRenderPass : ScriptableRenderPass
     {
         private readonly PCSSSettings m_Settings;
@@ -111,7 +112,7 @@ namespace PCSS.Runtime
                 filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp,
                 clearBuffer = false,
-                name = "_CustomScreenSpaceShadowmap"
+                name = "_PCSS_ScreenSpaceShadow"
             };
             TextureHandle finalResult = renderGraph.CreateTexture(finalDesc);
 
@@ -205,11 +206,35 @@ namespace PCSS.Runtime
 
                 // The consumer is a material outside the graph; never cull this pass.
                 builder.AllowPassCulling(false);
-                builder.SetGlobalTextureAfterPass(finalResult, PCSSShaderIDs.GlobalResult);
+
+                // Bind the PCSS result to URP's screen-space shadow slot so all
+                // standard materials read it through _MAIN_LIGHT_SHADOWS_SCREEN.
+                builder.SetGlobalTextureAfterPass(finalResult, PCSSShaderIDs.UrpScreenSpaceShadowmap);
 
                 builder.SetRenderFunc((PassData data, ComputeGraphContext ctx) => ExecutePass(data, ctx));
             }
+
+            // Set the keyword trio via a command-buffer pass (not Shader.EnableKeyword
+            // which is CPU-immediate and bypasses render graph ordering). The
+            // UseTexture(finalResult) dependency forces this pass after the compute
+            // pass. PCSSScreenSpaceShadowPostPass restores the atlas keywords before
+            // transparents render.
+            using (var kwBuilder = renderGraph.AddUnsafePass<KeywordPassData>(
+                       "PCSS Enable SS Shadow Keywords", out _, profilingSampler))
+            {
+                kwBuilder.UseTexture(finalResult, AccessFlags.Read);
+                kwBuilder.AllowGlobalStateModification(true);
+                kwBuilder.AllowPassCulling(false);
+                kwBuilder.SetRenderFunc((KeywordPassData _, UnsafeGraphContext ctx) =>
+                {
+                    ctx.cmd.SetKeyword(PCSSShaderIDs.KwScreenSpaceShadows, true);
+                    ctx.cmd.SetKeyword(PCSSShaderIDs.KwMainLightShadows, false);
+                    ctx.cmd.SetKeyword(PCSSShaderIDs.KwMainLightCascades, false);
+                });
+            }
         }
+
+        private class KeywordPassData { }
 
         private static void ExecutePass(PassData data, ComputeGraphContext ctx)
         {

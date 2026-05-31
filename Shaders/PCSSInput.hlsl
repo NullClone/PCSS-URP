@@ -21,7 +21,7 @@ SamplerState sampler_LinearClamp;
 
 RWTexture2D<float> _PCSS_MaskResult;  // kernel 0 output (1/4-res, 3-value mask)
 Texture2D<float> _PCSS_MaskTex;       // kernel 1 input (same content, bilinear)
-RWTexture2D<float> _SSShadowResult;   // kernel 1 output (_CustomScreenSpaceShadowmap)
+RWTexture2D<float> _SSShadowResult;   // kernel 1 output (-> _ScreenSpaceShadowmapTexture)
 
 // --- URP global shadow vars (set per-frame by MainLightShadowCasterPass) ------
 float4x4 _MainLightWorldToShadow[5];
