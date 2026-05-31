@@ -38,9 +38,16 @@ namespace PCSS.Runtime
         public float farSoftness = 12.0f;
 
         [Header("Bias")]
+        [Tooltip("Constant depth bias (normalized shadow depth) added to every " +
+                 "blocker/PCF comparison. Removes residual acne; too high causes " +
+                 "Peter-Panning (shadow detaches from the contact).")]
         [Range(0.0f, 0.01f)]
         public float depthBias = 0.001f;
 
+        [Tooltip("Scale of the cone-based per-sample Z-offset: each sample's bias " +
+                 "grows with its radius (a cone toward the light), so same-surface " +
+                 "samples are not false blockers. This is the main self-shadow / " +
+                 "banding fix; auto-strengthens as the sun gets lower. 0 disables it.")]
         [Range(0.0f, 5.0f)]
         public float slopeBias = 1.0f;
 

@@ -88,9 +88,14 @@ void CSBlurMask(uint3 id : SV_DispatchThreadID)
     if (id.x >= (uint)_PCSS_MaskSize.x || id.y >= (uint)_PCSS_MaskSize.y)
         return;
 
-    int2 maxCoord = int2((int)_PCSS_MaskSize.x - 1, (int)_PCSS_MaskSize.y - 1);
+    float2 baseUV = (id.xy + 0.5) * _PCSS_MaskSize.zw;
 
-    // Separable 1-2-1 Gaussian (3x3), clamped at the mask edges.
+    // 3x3 1-2-1 Gaussian, but sampled bilinearly at a >1-texel spread so the
+    // penumbra gate dilates wider (each off-centre tap averages two texels). A
+    // wider gate keeps the PCSS region covering the full physical penumbra, so
+    // the cross-fade to the hardware shadow lands in flat territory (no abrupt
+    // change). This mirrors the reference's "blur the mask to expand penumbra".
+    const float spread = 1.5;
     float sum = 0.0;
     float wSum = 0.0;
     [unroll]
@@ -99,10 +104,10 @@ void CSBlurMask(uint3 id : SV_DispatchThreadID)
         [unroll]
         for (int dx = -1; dx <= 1; dx++)
         {
-            int2 c = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), maxCoord);
-            float w = (dx == 0 ? 2.0 : 1.0) * (dy == 0 ? 2.0 : 1.0);
-            sum += _PCSS_MaskTex.Load(int3(c, 0)) * w;
-            wSum += w;
+            float2 uv = baseUV + float2(dx, dy) * spread * _PCSS_MaskSize.zw;
+            float wgt = (dx == 0 ? 2.0 : 1.0) * (dy == 0 ? 2.0 : 1.0);
+            sum += _PCSS_MaskTex.SampleLevel(sampler_LinearClamp, uv, 0) * wgt;
+            wSum += wgt;
         }
     }
 
@@ -140,27 +145,33 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
 
     float3 positionWS = ComputeWorldPosition(screenUV, rawDepth);
 
+    float texel = _PCSS_ShadowTexelSize;
+    uint cascadeA = ComputeCascadeIndex(positionWS);
+
+    // Non-penumbra fast path (RecaNoMaho's else-branch): a cheap hardware-PCF
+    // shadow. Sharp & correct in flat umbra — crucially, where two shadows
+    // overlap the deep region stays the proper dark hardware value instead of a
+    // lighter PCSS estimate (fixes "a light shadow sitting on top of a dark one").
+    float hw = SampleHardwareShadow(positionWS, cascadeA, texel);
+
+    // Penumbra weight from the recon mask. A *plateau*: ~1 across the whole
+    // penumbra core, easing to 0 only in the flat lit/umbra tails. This keeps
+    // PCSS's full soft gradient (a triangle weight would pull the penumbra edges
+    // toward the sharp hardware value and read as an abrupt change), and only
+    // cross-fades to the hardware shadow where PCSS and hw already agree — so the
+    // PCSS / non-PCSS boundary is smooth, matching the dilated-mask behaviour of
+    // the reference (RecaNoMaho's blurred penumbra mask).
+    float wUmbra = smoothstep(0.05, 0.35, maskV);       // 0 in flat umbra -> 1
+    float wLit   = 1.0 - smoothstep(0.65, 0.95, maskV); // 1 -> 0 toward flat lit
+    float w = wUmbra * wLit;
     float lit;
-    if (maskV < 0.1)
+    if (w > 0.001)
     {
-        // Non-penumbra (umbra) fast path: return a genuine shadow value via a
-        // cheap fixed-radius PCF instead of a hard 0. This keeps continuity with
-        // the penumbra gradient (no "pakkiri" black cut) while staying cheap.
-        float texel = _PCSS_ShadowTexelSize;
-        float angle = GetRotationAngle(id.xy);
-        uint cascadeU = ComputeCascadeIndex(positionWS);
-        bool validU;
-        lit = SampleHardShadowPCF(positionWS, cascadeU, angle, texel, validU);
-    }
-    else
-    {
-        float texel = _PCSS_ShadowTexelSize;
         float searchRadius = _PCSS_BlockerSearchRadius * texel;
         float angle = GetRotationAngle(id.xy);
 
-        uint cascadeA = ComputeCascadeIndex(positionWS);
         bool validA;
-        lit = SampleCascadePCSS(positionWS, cascadeA, id.xy, angle, texel, searchRadius, validA);
+        float pcss = SampleCascadePCSS(positionWS, cascadeA, id.xy, angle, texel, searchRadius, validA);
 
         // Cascade-border blend: lerp into the next cascade near the sphere edge.
         if (_PCSS_CascadeBorder > 0.0 && _PCSS_CascadeCount > 1 && (cascadeA + 1) < (uint)_PCSS_CascadeCount)
@@ -173,9 +184,16 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
                 bool validB;
                 float litB = SampleCascadePCSS(positionWS, cascadeA + 1, id.xy, angle, texel, searchRadius, validB);
                 if (validB)
-                    lit = lerp(lit, litB, blend);
+                    pcss = lerp(pcss, litB, blend);
             }
         }
+
+        lit = lerp(hw, pcss, w);
+    }
+    else
+    {
+        // Flat umbra (or near-flat): cheap hardware shadow only.
+        lit = hw;
     }
 
     // Shadow strength + distance fade.
@@ -188,10 +206,11 @@ void CSMainPCSS(uint3 id : SV_DispatchThreadID)
 
 // =============================================================================
 // Kernel : depth-guided spatial denoise (replaces TAA when it is disabled)
-// A 3x3 cross-bilateral blur on the raw PCSS result, weighted by world-space
-// depth so it never leaks across geometry edges. Only the penumbra band is
-// touched (lit/umbra are already flat), so contact edges stay crisp and the
-// grain from low-sample PCSS without temporal accumulation is smoothed out.
+// A 3x3 cross-bilateral blur on the raw PCSS result. Weighted by world-space
+// depth (never leaks across geometry edges) AND by shadow-value difference (a
+// range term, so a light penumbra never bleeds onto a dark umbra — no "light
+// shadow over dark shadow"). Skips the flat lit region; smooths the low-sample
+// PCSS grain everywhere else while preserving the dark/soft boundary.
 // =============================================================================
 [numthreads(8, 8, 1)]
 void CSDenoise(uint3 id : SV_DispatchThreadID)
@@ -201,11 +220,12 @@ void CSDenoise(uint3 id : SV_DispatchThreadID)
 
     float center = _PCSS_ShadowRawTex.Load(int3(id.xy, 0));
 
-    // Penumbra-only: lit (>0.9) and umbra (<0.1) are flat — pass them through so
-    // their (continuous) values and any sharp contact edges are preserved.
+    // Skip only the fully-lit region (flat 1.0); everything not lit may carry a
+    // soft PCSS gradient now, so it all gets denoised. The depth guard below keeps
+    // it from leaking across geometry edges.
     float2 uv = (id.xy + 0.5) * _PCSS_TextureSize.zw;
     float maskV = _PCSS_MaskTex.SampleLevel(sampler_LinearClamp, uv, 0);
-    if (maskV > 0.9 || maskV < 0.1)
+    if (maskV > 0.9)
     {
         _SSShadowResult[id.xy] = center;
         return;
@@ -216,6 +236,11 @@ void CSDenoise(uint3 id : SV_DispatchThreadID)
     float distCam = max(length(posC - _PCSS_CameraPosWS.xyz), 1e-3);
     float sigmaW = max(distCam * _PCSS_DenoiseDepthSigma, 1e-4);
     float invDenom = 1.0 / (2.0 * sigmaW * sigmaW);
+
+    // Range (shadow-value) guard: blur within a gradient but not across a big
+    // light/dark step, so a lighter shadow never washes a darker one out.
+    const float rangeSigma = 0.2;
+    float invRangeDenom = 1.0 / (2.0 * rangeSigma * rangeSigma);
 
     int2 maxCoord = int2((int)_PCSS_TextureSize.x - 1, (int)_PCSS_TextureSize.y - 1);
 
@@ -231,13 +256,16 @@ void CSDenoise(uint3 id : SV_DispatchThreadID)
             float2 nuv = (float2(c) + 0.5) * _PCSS_TextureSize.zw;
             float rawN = _CameraDepthTexture.SampleLevel(sampler_PointClamp, nuv, 0);
             float3 posN = ComputeWorldPosition(nuv, rawN);
+            float valN = _PCSS_ShadowRawTex.Load(int3(c, 0));
 
             float wSpatial = (dx == 0 ? 2.0 : 1.0) * (dy == 0 ? 2.0 : 1.0);
             float dW = distance(posC, posN);
             float wDepth = exp(-(dW * dW) * invDenom);
-            float w = wSpatial * wDepth;
+            float vDiff = valN - center;
+            float wRange = exp(-(vDiff * vDiff) * invRangeDenom);
+            float w = wSpatial * wDepth * wRange;
 
-            sum += _PCSS_ShadowRawTex.Load(int3(c, 0)) * w;
+            sum += valN * w;
             wSum += w;
         }
     }

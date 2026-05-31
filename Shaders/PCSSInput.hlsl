@@ -6,7 +6,6 @@
 // shadow variables (read-only, non-invasive) and the C#-set _PCSS_* params.
 // -----------------------------------------------------------------------------
 
-#define UMBRA_SAMPLES 8          // fixed cheap tap count for the umbra fast path
 #define GOLDEN_ANGLE 2.39996323  // radians; Fibonacci spiral angular step
 #define PI 3.14159265359
 #define TWO_PI 6.28318530718

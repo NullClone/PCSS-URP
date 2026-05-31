@@ -45,12 +45,30 @@ float2 RotateVec2(float2 v, float angle)
 // coverage for any 'count', far less clumpy than a small fixed Poisson set, so
 // it stays clean at low tap counts without TAA. 'angleOffset' is the per-pixel
 // rotation (blue noise / IGN) that decorrelates neighbouring pixels.
-float2 SampleDiskFibonacci(uint i, uint count, float angleOffset)
+// 'sampleDistNorm' returns the sample's normalized radial distance (0..1), used
+// by the cone-based Z-offset.
+float2 SampleDiskFibonacci(uint i, uint count, float angleOffset, out float sampleDistNorm)
 {
     float fi = (float)i;
-    float r = sqrt((fi + 0.5) / (float)count);
+    sampleDistNorm = sqrt((fi + 0.5) / (float)count);
     float theta = fi * GOLDEN_ANGLE + angleOffset;
-    return r * float2(cos(theta), sin(theta));
+    return sampleDistNorm * float2(cos(theta), sin(theta));
+}
+
+// Cone-based (receiver-plane) depth bias for a sample at radial atlas-UV distance
+// rUV. The bias grows linearly with rUV, so the comparison depths of distant
+// samples form a cone extruded toward the light: samples lying on the same
+// receiver surface no longer count as blockers, which removes self-shadow acne /
+// banding (HDRP's "cone-based Z-offset"). Scaled by the light's grazing angle so
+// a low sun (more acne-prone) gets a wider cone. worldPerUV / worldPerDepth come
+// from WorldToShadowCoordEx and convert atlas UV and normalized shadow depth to
+// world units; the result is a clamped bias in normalized shadow depth.
+float ConeDepthBias(float rUV, float worldPerUV, float worldPerDepth, float tanElev)
+{
+    float rWorld = rUV * worldPerUV;                         // sample radius in world units
+    float dWorld = _PCSS_SlopeBiasScale * rWorld / max(tanElev, 1e-3); // cone height (world)
+    float b = _PCSS_DepthBias + dWorld / max(worldPerDepth, 1e-6);     // -> normalized depth
+    return min(b, 0.05);
 }
 
 // Reconstruct world position from screen UV and raw device depth. Reuses
