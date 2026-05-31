@@ -38,11 +38,15 @@ namespace PCSS.Runtime
         [Range(0.0f, 0.5f)]
         public float cascadeBlend = 0.25f;
 
-        public bool stabilizeSampling = true;
+        public bool stabilizeSampling = false;
 
         [Header("Sampling")]
         public bool useBlueNoise = true;
         public bool useTemporalJitter = true;
         public Texture2D blueNoiseTexture;
+
+        [Header("Debug")]
+        public PCSSDebugMode debugMode = PCSSDebugMode.None;
+        public Shader debugShader;
     }
 }

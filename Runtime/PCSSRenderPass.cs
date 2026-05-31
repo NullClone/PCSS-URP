@@ -128,6 +128,12 @@ namespace PCSS.Runtime
             };
             TextureHandle mask = renderGraph.CreateTexture(maskDesc);
 
+            // Publish handles so the optional debug pass (recorded at a later event)
+            // can read them within this frame's graph.
+            var pcssResources = frameData.GetOrCreate<PCSSResources>();
+            pcssResources.mask = mask;
+            pcssResources.shadow = finalResult;
+
             // RenderGraph path cannot use the public GetGPUProjectionMatrix(), so
             // build the GPU projection here. renderIntoTexture:true pairs with the
             // shader's clip-space Y flip.

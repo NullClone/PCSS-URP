@@ -1,0 +1,18 @@
+{
+    "name": "PCSS.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:e439c50b7e0e70c4695e8a6414385fd6"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
