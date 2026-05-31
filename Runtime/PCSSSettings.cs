@@ -42,11 +42,13 @@ namespace PCSS.Runtime
 
         [Header("Sampling")]
         public bool useBlueNoise = true;
+
         public bool useTemporalJitter = true;
         public Texture2D blueNoiseTexture;
 
         [Header("Debug")]
         public PCSSDebugMode debugMode = PCSSDebugMode.None;
+
         public Shader debugShader;
     }
 }

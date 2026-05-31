@@ -15,8 +15,8 @@ namespace PCSS.Runtime
         public static readonly int ShadowmapTex = Shader.PropertyToID("_MainLightShadowmapTexture");
         public static readonly int BlueNoiseTex = Shader.PropertyToID("_PCSS_BlueNoiseTex");
         public static readonly int MaskResult = Shader.PropertyToID("_PCSS_MaskResult"); // kernel 0 output
-        public static readonly int MaskTex = Shader.PropertyToID("_PCSS_MaskTex");        // kernel 1 input
-        public static readonly int SSResult = Shader.PropertyToID("_SSShadowResult");     // kernel 1 output
+        public static readonly int MaskTex = Shader.PropertyToID("_PCSS_MaskTex"); // kernel 1 input
+        public static readonly int SSResult = Shader.PropertyToID("_SSShadowResult"); // kernel 1 output
 
         // Output global texture consumed by receiver materials.
         public static readonly int GlobalResult = Shader.PropertyToID("_CustomScreenSpaceShadowmap");

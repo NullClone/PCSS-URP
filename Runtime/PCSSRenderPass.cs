@@ -150,6 +150,7 @@ namespace PCSS.Runtime
                 m_BlueNoiseRT = RTHandles.Alloc(noiseSource);
                 m_BlueNoiseSource = noiseSource;
             }
+
             TextureHandle blueNoiseHandle = renderGraph.ImportTexture(m_BlueNoiseRT);
 
             using (var builder = renderGraph.AddComputePass<PassData>(passName, out var passData, profilingSampler))

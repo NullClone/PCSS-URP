@@ -57,8 +57,10 @@ namespace PCSS.Runtime
                                      "(assign Shaders/PCSSDebug.shader). Skipping debug view.");
                     m_DebugShaderWarned = true;
                 }
+
                 return;
             }
+
             m_DebugShaderWarned = false;
 
             if (m_DebugMaterial == null || m_DebugMaterial.shader != settings.debugShader)
